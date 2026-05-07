@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Query
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, FeatureVectorChurn
-from src.utils import get_dataset_info, get_dataset_preview
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn
+from src.utils import get_dataset_info, get_dataset_preview, get_dataset_split_info
 
 app = FastAPI()
 
@@ -23,3 +23,8 @@ def dataset_preview(limit: int = Query(default=5, ge=1, le=100)) -> list[Dataset
 @app.get("/dataset/info", response_model=DatasetInfoChurn)
 def dataset_info() -> DatasetInfoChurn:
     return get_dataset_info()
+
+
+@app.get("/dataset/split-info", response_model=DatasetSplitInfoChurn)
+def dataset_split_info() -> DatasetSplitInfoChurn:
+    return get_dataset_split_info()

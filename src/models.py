@@ -22,3 +22,15 @@ class DatasetInfoChurn(BaseModel):
     column_count: int
     feature_names: list[str]
     churn_distribution: dict[str, int]
+
+
+class DatasetSplitInfoChurn(BaseModel):
+    train_size: int
+    test_size: int
+    test_size_ratio: float
+    random_state: int
+    stratified: bool
+    numeric_columns: list[str]
+    categorical_columns: list[str]
+    train_churn_distribution: dict[str, int]
+    test_churn_distribution: dict[str, int]
