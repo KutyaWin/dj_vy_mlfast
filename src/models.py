@@ -34,3 +34,15 @@ class DatasetSplitInfoChurn(BaseModel):
     categorical_columns: list[str]
     train_churn_distribution: dict[str, int]
     test_churn_distribution: dict[str, int]
+
+
+class TrainModelResponseChurn(BaseModel):
+    model_name: str
+    train_size: int
+    test_size: int
+    accuracy: float
+    f1: float
+    random_state: int
+    test_size_ratio: float
+    numeric_columns: list[str]
+    categorical_columns: list[str]

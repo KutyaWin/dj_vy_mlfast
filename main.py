@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Query
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn
-from src.utils import get_dataset_info, get_dataset_preview, get_dataset_split_info
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, TrainModelResponseChurn
+from src.utils import get_dataset_info, get_dataset_preview, get_dataset_split_info, run_churn_model_training
 
 app = FastAPI()
 
@@ -28,3 +28,8 @@ def dataset_info() -> DatasetInfoChurn:
 @app.get("/dataset/split-info", response_model=DatasetSplitInfoChurn)
 def dataset_split_info() -> DatasetSplitInfoChurn:
     return get_dataset_split_info()
+
+
+@app.post("/model/train", response_model=TrainModelResponseChurn)
+def train_model() -> TrainModelResponseChurn:
+    return run_churn_model_training()
