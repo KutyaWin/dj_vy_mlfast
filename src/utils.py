@@ -1,6 +1,9 @@
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
+import json
 
+import joblib
 import pandas as pd
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -12,10 +15,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ModelStatusChurn, TrainModelResponseChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
+MODELS_PATH = Path(__file__).resolve().parent.parent / "models"
+CHURN_MODEL_PATH = MODELS_PATH / "churn_model.joblib"
+CHURN_MODEL_METADATA_PATH = MODELS_PATH / "churn_model_metadata.json"
 NUMERIC_FEATURE_COLUMNS = [
     "monthly_fee",
     "usage_hours",
@@ -33,6 +39,83 @@ DEFAULT_RANDOM_STATE = 42
 MODEL_NAME = "LogisticRegression"
 
 trained_churn_model: Optional[Pipeline] = None
+trained_churn_model_metadata: Optional[dict[str, object]] = None
+
+
+def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
+    metadata = {
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "model_path": str(CHURN_MODEL_PATH),
+        "metrics": metrics.model_dump(),
+    }
+
+    try:
+        MODELS_PATH.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, CHURN_MODEL_PATH)
+        CHURN_MODEL_METADATA_PATH.write_text(json.dumps(metadata), encoding="utf-8")
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to save trained model: {error}") from error
+
+    global trained_churn_model_metadata
+    trained_churn_model_metadata = metadata
+
+
+def load_churn_model() -> Optional[Pipeline]:
+    global trained_churn_model
+    global trained_churn_model_metadata
+
+    if not CHURN_MODEL_PATH.exists():
+        trained_churn_model = None
+        trained_churn_model_metadata = None
+        return None
+
+    try:
+        loaded_model = joblib.load(CHURN_MODEL_PATH)
+    except Exception:
+        trained_churn_model = None
+        trained_churn_model_metadata = None
+        return None
+
+    metadata: Optional[dict[str, object]] = None
+    if CHURN_MODEL_METADATA_PATH.exists():
+        try:
+            metadata = json.loads(CHURN_MODEL_METADATA_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = None
+
+    trained_churn_model = loaded_model
+    trained_churn_model_metadata = metadata or {"model_path": str(CHURN_MODEL_PATH)}
+    return loaded_model
+
+
+def initialize_churn_model_state() -> None:
+    load_churn_model()
+
+
+def get_churn_model_status() -> ModelStatusChurn:
+    metrics = None
+    trained_at = None
+    model_path = None
+
+    if trained_churn_model_metadata is not None:
+        trained_at_value = trained_churn_model_metadata.get("trained_at")
+        model_path_value = trained_churn_model_metadata.get("model_path")
+        metrics_value = trained_churn_model_metadata.get("metrics")
+
+        trained_at = trained_at_value if isinstance(trained_at_value, str) else None
+        model_path = model_path_value if isinstance(model_path_value, str) else None
+        if isinstance(metrics_value, dict):
+            try:
+                metrics = TrainModelResponseChurn.model_validate(metrics_value)
+            except ValidationError:
+                metrics = None
+
+    return ModelStatusChurn(
+        is_trained=trained_churn_model is not None,
+        trained_at=trained_at,
+        model_path=model_path,
+        metrics=metrics,
+    )
 
 
 def load_churn_dataset() -> pd.DataFrame:
@@ -233,7 +316,7 @@ def run_churn_model_training(
     except ValueError as error:
         raise HTTPException(status_code=500, detail=f"Unable to generate predictions: {error}") from error
 
-    return TrainModelResponseChurn(
+    training_result = TrainModelResponseChurn(
         model_name=MODEL_NAME,
         train_size=int(features_train.shape[0]),
         test_size=int(features_test.shape[0]),
@@ -244,3 +327,6 @@ def run_churn_model_training(
         numeric_columns=numeric_columns,
         categorical_columns=categorical_columns,
     )
+
+    save_churn_model(trained_churn_model, training_result)
+    return training_result

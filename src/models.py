@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class FeatureVectorChurn(BaseModel):
@@ -47,3 +48,10 @@ class TrainModelResponseChurn(BaseModel):
     test_size_ratio: float
     numeric_columns: list[str]
     categorical_columns: list[str]
+
+
+class ModelStatusChurn(BaseModel):
+    is_trained: bool
+    trained_at: Optional[str]
+    model_path: Optional[str]
+    metrics: Optional[TrainModelResponseChurn]
