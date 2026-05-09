@@ -132,6 +132,7 @@ def get_dataset_info() -> DatasetInfoChurn:
         row_count=int(validated_dataframe.shape[0]),
         column_count=int(validated_dataframe.shape[1]),
         feature_names=FEATURE_COLUMNS,
+        target_name=TARGET_COLUMN,
         churn_distribution=churn_distribution,
     )
 

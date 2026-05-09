@@ -21,6 +21,7 @@ class DatasetInfoChurn(BaseModel):
     row_count: int
     column_count: int
     feature_names: list[str]
+    target_name: str
     churn_distribution: dict[str, int]
 
 
