@@ -55,3 +55,9 @@ class ModelStatusChurn(BaseModel):
     trained_at: Optional[str]
     model_path: Optional[str]
     metrics: Optional[TrainModelResponseChurn]
+
+
+class PredictionResponseChurn(BaseModel):
+    predicted_class: int
+    churn_probability: float
+    non_churn_probability: float

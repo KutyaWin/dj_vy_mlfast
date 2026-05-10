@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ModelStatusChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainModelResponseChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
@@ -116,6 +116,50 @@ def get_churn_model_status() -> ModelStatusChurn:
         model_path=model_path,
         metrics=metrics,
     )
+
+
+def get_active_churn_model() -> Pipeline:
+    if trained_churn_model is not None:
+        return trained_churn_model
+
+    loaded_model = load_churn_model()
+    if loaded_model is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Churn model is not trained. Train the model via POST /model/train first.",
+        )
+
+    return loaded_model
+
+
+def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponseChurn]:
+    if not payloads:
+        raise HTTPException(status_code=400, detail="Prediction request must contain at least one client")
+
+    model = get_active_churn_model()
+    feature_dataframe = pd.DataFrame([payload.model_dump() for payload in payloads], columns=FEATURE_COLUMNS)
+
+    try:
+        predicted_classes = model.predict(feature_dataframe)
+        predicted_probabilities = model.predict_proba(feature_dataframe)
+    except ValueError as error:
+        raise HTTPException(status_code=500, detail=f"Unable to generate predictions: {error}") from error
+
+    class_labels = list(model.classes_)
+    churn_index = class_labels.index(1)
+    non_churn_index = class_labels.index(0)
+
+    responses: list[PredictionResponseChurn] = []
+    for predicted_class, probabilities in zip(predicted_classes, predicted_probabilities):
+        responses.append(
+            PredictionResponseChurn(
+                predicted_class=int(predicted_class),
+                churn_probability=float(probabilities[churn_index]),
+                non_churn_probability=float(probabilities[non_churn_index]),
+            )
+        )
+
+    return responses
 
 
 def load_churn_dataset() -> pd.DataFrame:

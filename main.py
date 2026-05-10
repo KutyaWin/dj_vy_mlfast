@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+from typing import Union
 
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Query
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, TrainModelResponseChurn
-from src.utils import get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, run_churn_model_training
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainModelResponseChurn
+from src.utils import get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
 
 
 @asynccontextmanager
@@ -19,9 +20,106 @@ app = FastAPI(lifespan=lifespan)
 def read_root() -> dict[str, str]:
     return {"message": "ml churn service is running"}
 
-@app.post("/predict", response_model=FeatureVectorChurn)
-def predict(payload: FeatureVectorChurn) -> FeatureVectorChurn:
-    return payload
+
+@app.post(
+    "/predict",
+    response_model=Union[PredictionResponseChurn, list[PredictionResponseChurn]],
+    responses={
+        200: {
+            "description": "Churn predictions for one or multiple clients",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "single_prediction": {
+                            "summary": "Prediction for one client",
+                            "value": {
+                                "predicted_class": 0,
+                                "churn_probability": 0.18,
+                                "non_churn_probability": 0.82,
+                            },
+                        },
+                        "batch_prediction": {
+                            "summary": "Prediction for multiple clients",
+                            "value": [
+                                {
+                                    "predicted_class": 0,
+                                    "churn_probability": 0.18,
+                                    "non_churn_probability": 0.82,
+                                },
+                                {
+                                    "predicted_class": 1,
+                                    "churn_probability": 0.71,
+                                    "non_churn_probability": 0.29,
+                                },
+                            ],
+                        },
+                    }
+                }
+            },
+        },
+        409: {
+            "description": "Churn model is not trained yet",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Churn model is not trained. Train the model via POST /model/train first."
+                    }
+                }
+            },
+        },
+    },
+)
+def predict(
+    payload: Union[FeatureVectorChurn, list[FeatureVectorChurn]] = Body(
+        ...,
+        openapi_examples={
+            "single_client": {
+                "summary": "Single client payload",
+                "value": {
+                    "monthly_fee": 39.99,
+                    "usage_hours": 87.5,
+                    "support_requests": 1,
+                    "account_age_months": 24,
+                    "failed_payments": 0,
+                    "region": "North",
+                    "device_type": "Mobile",
+                    "payment_method": "Card",
+                    "autopay_enabled": 1,
+                },
+            },
+            "batch_clients": {
+                "summary": "Batch payload",
+                "value": [
+                    {
+                        "monthly_fee": 39.99,
+                        "usage_hours": 87.5,
+                        "support_requests": 1,
+                        "account_age_months": 24,
+                        "failed_payments": 0,
+                        "region": "North",
+                        "device_type": "Mobile",
+                        "payment_method": "Card",
+                        "autopay_enabled": 1,
+                    },
+                    {
+                        "monthly_fee": 79.99,
+                        "usage_hours": 12.0,
+                        "support_requests": 6,
+                        "account_age_months": 3,
+                        "failed_payments": 2,
+                        "region": "West",
+                        "device_type": "Desktop",
+                        "payment_method": "Bank Transfer",
+                        "autopay_enabled": 0,
+                    },
+                ],
+            },
+        },
+    )
+) -> Union[PredictionResponseChurn, list[PredictionResponseChurn]]:
+    payloads = payload if isinstance(payload, list) else [payload]
+    predictions = predict_churn(payloads)
+    return predictions if isinstance(payload, list) else predictions[0]
 
 
 @app.get("/dataset/preview", response_model=list[DatasetRowChurn])
