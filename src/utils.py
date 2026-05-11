@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone
 import json
 
@@ -14,8 +14,9 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
@@ -36,7 +37,11 @@ TARGET_COLUMN = "churn"
 REQUIRED_COLUMNS = FEATURE_COLUMNS + [TARGET_COLUMN]
 DEFAULT_TEST_SIZE = 0.2
 DEFAULT_RANDOM_STATE = 42
-MODEL_NAME = "LogisticRegression"
+DEFAULT_MODEL_TYPE = "logreg"
+MODEL_NAMES = {
+    "logreg": "LogisticRegression",
+    "random_forest": "RandomForestClassifier",
+}
 
 trained_churn_model: Optional[Pipeline] = None
 trained_churn_model_metadata: Optional[dict[str, object]] = None
@@ -46,6 +51,8 @@ def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
     metadata = {
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "model_path": str(CHURN_MODEL_PATH),
+        "model_type": metrics.model_type,
+        "hyperparameters": metrics.hyperparameters,
         "metrics": metrics.model_dump(),
     }
 
@@ -96,24 +103,37 @@ def get_churn_model_status() -> ModelStatusChurn:
     metrics = None
     trained_at = None
     model_path = None
+    model_type = None
+    hyperparameters = None
 
     if trained_churn_model_metadata is not None:
         trained_at_value = trained_churn_model_metadata.get("trained_at")
         model_path_value = trained_churn_model_metadata.get("model_path")
+        model_type_value = trained_churn_model_metadata.get("model_type")
+        hyperparameters_value = trained_churn_model_metadata.get("hyperparameters")
         metrics_value = trained_churn_model_metadata.get("metrics")
 
         trained_at = trained_at_value if isinstance(trained_at_value, str) else None
         model_path = model_path_value if isinstance(model_path_value, str) else None
+        model_type = model_type_value if isinstance(model_type_value, str) else None
+        hyperparameters = hyperparameters_value if isinstance(hyperparameters_value, dict) else None
         if isinstance(metrics_value, dict):
             try:
                 metrics = TrainModelResponseChurn.model_validate(metrics_value)
             except ValidationError:
                 metrics = None
 
+        if model_type is None and metrics is not None:
+            model_type = metrics.model_type
+        if hyperparameters is None and metrics is not None:
+            hyperparameters = metrics.hyperparameters
+
     return ModelStatusChurn(
         is_trained=trained_churn_model is not None,
         trained_at=trained_at,
         model_path=model_path,
+        model_type=model_type,
+        hyperparameters=hyperparameters,
         metrics=metrics,
     )
 
@@ -294,7 +314,50 @@ def get_dataset_split_info(
     )
 
 
-def build_churn_model_pipeline() -> Pipeline:
+def normalize_training_config(config: Optional[TrainingConfigChurn]) -> TrainingConfigChurn:
+    if config is None:
+        return TrainingConfigChurn()
+
+    normalized_model_type = config.model_type.strip().lower()
+    return TrainingConfigChurn(
+        model_type=normalized_model_type,
+        hyperparameters=dict(config.hyperparameters),
+    )
+
+
+def build_churn_estimator(config: TrainingConfigChurn):
+    model_type = config.model_type
+    hyperparameters = dict(config.hyperparameters)
+
+    if model_type == "logreg":
+        estimator_params: dict[str, Any] = {
+            "max_iter": 1000,
+            "random_state": DEFAULT_RANDOM_STATE,
+            "solver": "liblinear",
+        }
+        estimator_params.update(hyperparameters)
+        try:
+            return LogisticRegression(**estimator_params)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=f"Invalid hyperparameters for logreg: {error}") from error
+
+    if model_type == "random_forest":
+        estimator_params = {
+            "random_state": DEFAULT_RANDOM_STATE,
+        }
+        estimator_params.update(hyperparameters)
+        try:
+            return RandomForestClassifier(**estimator_params)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=f"Invalid hyperparameters for random_forest: {error}") from error
+
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported model_type. Supported values: logreg, random_forest",
+    )
+
+
+def build_churn_model_pipeline(config: TrainingConfigChurn) -> Pipeline:
     numeric_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -313,31 +376,41 @@ def build_churn_model_pipeline() -> Pipeline:
             ("categorical", categorical_transformer, CATEGORICAL_FEATURE_COLUMNS),
         ]
     )
+    estimator = build_churn_estimator(config)
 
     return Pipeline(
         steps=[
             ("preprocessor", preprocessor),
-            ("model", LogisticRegression(max_iter=1000, random_state=DEFAULT_RANDOM_STATE, solver="liblinear")),
+            ("model", estimator),
         ]
     )
 
 
-def train_churn_model(feature_dataframe: pd.DataFrame, target_series: pd.Series) -> Pipeline:
+def train_churn_model(
+    feature_dataframe: pd.DataFrame,
+    target_series: pd.Series,
+    config: TrainingConfigChurn,
+) -> Pipeline:
     if feature_dataframe.empty or target_series.empty:
         raise HTTPException(status_code=400, detail="Training dataset is empty")
 
-    pipeline = build_churn_model_pipeline()
-    pipeline.fit(feature_dataframe, target_series)
+    pipeline = build_churn_model_pipeline(config)
+    try:
+        pipeline.fit(feature_dataframe, target_series)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=f"Unable to train model: {error}") from error
     return pipeline
 
 
 def run_churn_model_training(
+    config: Optional[TrainingConfigChurn] = None,
     test_size: float = DEFAULT_TEST_SIZE,
     random_state: int = DEFAULT_RANDOM_STATE,
     stratified: bool = True,
 ) -> TrainModelResponseChurn:
     global trained_churn_model
 
+    normalized_config = normalize_training_config(config)
     feature_dataframe, target_series, numeric_columns, categorical_columns = prepare_churn_data()
     if len(feature_dataframe) < 2:
         raise HTTPException(status_code=400, detail="Dataset does not contain enough rows for training")
@@ -353,7 +426,7 @@ def run_churn_model_training(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=f"Unable to split dataset for training: {error}") from error
 
-    trained_churn_model = train_churn_model(features_train, target_train)
+    trained_churn_model = train_churn_model(features_train, target_train, normalized_config)
 
     try:
         predictions = trained_churn_model.predict(features_test)
@@ -361,7 +434,9 @@ def run_churn_model_training(
         raise HTTPException(status_code=500, detail=f"Unable to generate predictions: {error}") from error
 
     training_result = TrainModelResponseChurn(
-        model_name=MODEL_NAME,
+        model_name=MODEL_NAMES[normalized_config.model_type],
+        model_type=normalized_config.model_type,
+        hyperparameters=normalized_config.hyperparameters,
         train_size=int(features_train.shape[0]),
         test_size=int(features_test.shape[0]),
         accuracy=float(accuracy_score(target_test, predictions)),

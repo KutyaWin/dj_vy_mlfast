@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 
 class FeatureVectorChurn(BaseModel):
@@ -38,8 +39,15 @@ class DatasetSplitInfoChurn(BaseModel):
     test_churn_distribution: dict[str, int]
 
 
+class TrainingConfigChurn(BaseModel):
+    model_type: str = "logreg"
+    hyperparameters: dict[str, Any] = Field(default_factory=dict)
+
+
 class TrainModelResponseChurn(BaseModel):
     model_name: str
+    model_type: str = "logreg"
+    hyperparameters: dict[str, Any] = Field(default_factory=dict)
     train_size: int
     test_size: int
     accuracy: float
@@ -54,6 +62,8 @@ class ModelStatusChurn(BaseModel):
     is_trained: bool
     trained_at: Optional[str]
     model_path: Optional[str]
+    model_type: Optional[str]
+    hyperparameters: Optional[dict[str, Any]]
     metrics: Optional[TrainModelResponseChurn]
 
 

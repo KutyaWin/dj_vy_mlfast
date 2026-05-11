@@ -1,9 +1,9 @@
 from contextlib import asynccontextmanager
-from typing import Union
+from typing import Annotated, Optional, Union
 
 from fastapi import Body, FastAPI, Query
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
 from src.utils import get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
 
 
@@ -139,8 +139,34 @@ def dataset_split_info() -> DatasetSplitInfoChurn:
 
 
 @app.post("/model/train", response_model=TrainModelResponseChurn)
-def train_model() -> TrainModelResponseChurn:
-    return run_churn_model_training()
+def train_model(
+    config: Annotated[
+        Optional[TrainingConfigChurn],
+        Body(
+            openapi_examples={
+                "default_logreg": {
+                    "summary": "Default logistic regression training",
+                    "value": {
+                        "model_type": "logreg",
+                        "hyperparameters": {},
+                    },
+                },
+                "random_forest": {
+                    "summary": "Random forest with custom hyperparameters",
+                    "value": {
+                        "model_type": "random_forest",
+                        "hyperparameters": {
+                            "n_estimators": 200,
+                            "max_depth": 8,
+                            "min_samples_split": 4,
+                        },
+                    },
+                },
+            },
+        ),
+    ] = None
+) -> TrainModelResponseChurn:
+    return run_churn_model_training(config=config)
 
 
 @app.get("/model/status", response_model=ModelStatusChurn)
