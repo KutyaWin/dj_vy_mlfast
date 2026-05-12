@@ -71,3 +71,15 @@ class PredictionResponseChurn(BaseModel):
     predicted_class: int
     churn_probability: float
     non_churn_probability: float
+
+
+class FeatureSchemaItemChurn(BaseModel):
+    name: str
+    data_type: str
+    feature_kind: str
+
+
+class ModelSchemaChurn(BaseModel):
+    features: list[FeatureSchemaItemChurn]
+    numeric_features: list[str]
+    categorical_features: list[str]

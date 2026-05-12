@@ -3,8 +3,8 @@ from typing import Annotated, Optional, Union
 
 from fastapi import Body, FastAPI, Query
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
-from src.utils import get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.utils import get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
 
 
 @asynccontextmanager
@@ -172,3 +172,8 @@ def train_model(
 @app.get("/model/status", response_model=ModelStatusChurn)
 def model_status() -> ModelStatusChurn:
     return get_churn_model_status()
+
+
+@app.get("/model/schema", response_model=ModelSchemaChurn)
+def model_schema() -> ModelSchemaChurn:
+    return get_churn_model_schema()

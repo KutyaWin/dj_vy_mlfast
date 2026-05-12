@@ -16,7 +16,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureSchemaItemChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
@@ -41,6 +41,17 @@ DEFAULT_MODEL_TYPE = "logreg"
 MODEL_NAMES = {
     "logreg": "LogisticRegression",
     "random_forest": "RandomForestClassifier",
+}
+FEATURE_VALUE_TYPES = {
+    "monthly_fee": "float",
+    "usage_hours": "float",
+    "support_requests": "int",
+    "account_age_months": "int",
+    "failed_payments": "int",
+    "autopay_enabled": "int",
+    "region": "str",
+    "device_type": "str",
+    "payment_method": "str",
 }
 
 trained_churn_model: Optional[Pipeline] = None
@@ -152,12 +163,54 @@ def get_active_churn_model() -> Pipeline:
     return loaded_model
 
 
+def get_churn_model_schema() -> ModelSchemaChurn:
+    features: list[FeatureSchemaItemChurn] = []
+
+    for feature_name in FEATURE_COLUMNS:
+        feature_kind = "numeric" if feature_name in NUMERIC_FEATURE_COLUMNS else "categorical"
+        features.append(
+            FeatureSchemaItemChurn(
+                name=feature_name,
+                data_type=FEATURE_VALUE_TYPES[feature_name],
+                feature_kind=feature_kind,
+            )
+        )
+
+    return ModelSchemaChurn(
+        features=features,
+        numeric_features=NUMERIC_FEATURE_COLUMNS,
+        categorical_features=CATEGORICAL_FEATURE_COLUMNS,
+    )
+
+
+def build_churn_feature_dataframe_from_records(records: list[dict[str, object]]) -> pd.DataFrame:
+    feature_dataframe = pd.DataFrame(records, columns=FEATURE_COLUMNS)
+    if feature_dataframe.empty:
+        return feature_dataframe
+
+    feature_dataframe = feature_dataframe.copy()
+    feature_dataframe.loc[:, NUMERIC_FEATURE_COLUMNS] = feature_dataframe[NUMERIC_FEATURE_COLUMNS].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    feature_dataframe.loc[:, CATEGORICAL_FEATURE_COLUMNS] = feature_dataframe[CATEGORICAL_FEATURE_COLUMNS].where(
+        feature_dataframe[CATEGORICAL_FEATURE_COLUMNS].notna(),
+        None,
+    )
+    return feature_dataframe
+
+
+def build_churn_feature_dataframe(payloads: list[FeatureVectorChurn]) -> pd.DataFrame:
+    records = [payload.model_dump() for payload in payloads]
+    return build_churn_feature_dataframe_from_records(records)
+
+
 def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponseChurn]:
     if not payloads:
         raise HTTPException(status_code=400, detail="Prediction request must contain at least one client")
 
     model = get_active_churn_model()
-    feature_dataframe = pd.DataFrame([payload.model_dump() for payload in payloads], columns=FEATURE_COLUMNS)
+    feature_dataframe = build_churn_feature_dataframe(payloads)
 
     try:
         predicted_classes = model.predict(feature_dataframe)
@@ -213,28 +266,13 @@ def prepare_churn_data() -> tuple[pd.DataFrame, pd.Series, list[str], list[str]]
     if dataframe.empty:
         raise HTTPException(status_code=400, detail="Dataset is empty")
 
-    feature_dataframe = dataframe[FEATURE_COLUMNS].copy()
+    feature_dataframe = build_churn_feature_dataframe_from_records(
+        dataframe[FEATURE_COLUMNS].to_dict(orient="records")
+    )
     target_series = pd.to_numeric(dataframe[TARGET_COLUMN], errors="coerce")
     if target_series.isna().any():
         raise HTTPException(status_code=500, detail="Target column churn contains missing or invalid values")
     target_series = target_series.astype(int)
-
-    feature_dataframe.loc[:, NUMERIC_FEATURE_COLUMNS] = feature_dataframe[NUMERIC_FEATURE_COLUMNS].apply(
-        pd.to_numeric,
-        errors="coerce",
-    )
-    numeric_fill_values = feature_dataframe[NUMERIC_FEATURE_COLUMNS].median()
-    feature_dataframe.loc[:, NUMERIC_FEATURE_COLUMNS] = feature_dataframe[NUMERIC_FEATURE_COLUMNS].fillna(
-        numeric_fill_values,
-    )
-
-    categorical_fill_values = {}
-    for column in CATEGORICAL_FEATURE_COLUMNS:
-        mode = feature_dataframe[column].mode(dropna=True)
-        categorical_fill_values[column] = mode.iloc[0] if not mode.empty else ""
-    feature_dataframe.loc[:, CATEGORICAL_FEATURE_COLUMNS] = feature_dataframe[
-        CATEGORICAL_FEATURE_COLUMNS
-    ].fillna(categorical_fill_values)
 
     return feature_dataframe, target_series, NUMERIC_FEATURE_COLUMNS, CATEGORICAL_FEATURE_COLUMNS
 
