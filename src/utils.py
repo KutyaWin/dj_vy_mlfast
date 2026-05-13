@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from datetime import datetime, timezone
 import json
 
@@ -58,6 +58,22 @@ trained_churn_model: Optional[Pipeline] = None
 trained_churn_model_metadata: Optional[dict[str, object]] = None
 
 
+def build_churn_http_exception(
+    status_code: int,
+    code: str,
+    message: str,
+    details: Optional[Union[dict[str, Any], list[dict[str, Any]]]] = None,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+            "details": details,
+        },
+    )
+
+
 def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
     metadata = {
         "trained_at": datetime.now(timezone.utc).isoformat(),
@@ -72,7 +88,12 @@ def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
         joblib.dump(model, CHURN_MODEL_PATH)
         CHURN_MODEL_METADATA_PATH.write_text(json.dumps(metadata), encoding="utf-8")
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Unable to save trained model: {error}") from error
+        raise build_churn_http_exception(
+            status_code=500,
+            code="model_save_failed",
+            message="Unable to save the trained churn model.",
+            details={"reason": str(error)},
+        ) from error
 
     global trained_churn_model_metadata
     trained_churn_model_metadata = metadata
@@ -155,9 +176,10 @@ def get_active_churn_model() -> Pipeline:
 
     loaded_model = load_churn_model()
     if loaded_model is None:
-        raise HTTPException(
+        raise build_churn_http_exception(
             status_code=409,
-            detail="Churn model is not trained. Train the model via POST /model/train first.",
+            code="model_not_trained",
+            message="Churn model is not trained. Train the model via POST /model/train first.",
         )
 
     return loaded_model
@@ -207,7 +229,11 @@ def build_churn_feature_dataframe(payloads: list[FeatureVectorChurn]) -> pd.Data
 
 def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponseChurn]:
     if not payloads:
-        raise HTTPException(status_code=400, detail="Prediction request must contain at least one client")
+        raise build_churn_http_exception(
+            status_code=400,
+            code="empty_prediction_request",
+            message="Prediction request must contain at least one client.",
+        )
 
     model = get_active_churn_model()
     feature_dataframe = build_churn_feature_dataframe(payloads)
@@ -216,7 +242,12 @@ def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponse
         predicted_classes = model.predict(feature_dataframe)
         predicted_probabilities = model.predict_proba(feature_dataframe)
     except ValueError as error:
-        raise HTTPException(status_code=500, detail=f"Unable to generate predictions: {error}") from error
+        raise build_churn_http_exception(
+            status_code=500,
+            code="prediction_failed",
+            message="Unable to generate churn predictions.",
+            details={"reason": str(error)},
+        ) from error
 
     class_labels = list(model.classes_)
     churn_index = class_labels.index(1)
@@ -237,18 +268,28 @@ def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponse
 
 def load_churn_dataset() -> pd.DataFrame:
     if not DATASET_PATH.exists():
-        raise HTTPException(status_code=404, detail="Dataset file not found")
+        raise build_churn_http_exception(
+            status_code=404,
+            code="dataset_not_found",
+            message="Dataset file not found.",
+        )
 
     try:
         dataframe = pd.read_csv(DATASET_PATH)
     except pd.errors.EmptyDataError as error:
-        raise HTTPException(status_code=400, detail="Dataset file is empty") from error
+        raise build_churn_http_exception(
+            status_code=400,
+            code="dataset_file_empty",
+            message="Dataset file is empty.",
+        ) from error
 
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in dataframe.columns]
     if missing_columns:
-        raise HTTPException(
+        raise build_churn_http_exception(
             status_code=500,
-            detail=f"Dataset is missing required columns: {', '.join(missing_columns)}",
+            code="dataset_schema_invalid",
+            message="Dataset is missing required columns.",
+            details={"missing_columns": missing_columns},
         )
 
     return dataframe[REQUIRED_COLUMNS]
@@ -264,14 +305,22 @@ def get_validated_churn_dataframe() -> pd.DataFrame:
 def prepare_churn_data() -> tuple[pd.DataFrame, pd.Series, list[str], list[str]]:
     dataframe = load_churn_dataset().copy()
     if dataframe.empty:
-        raise HTTPException(status_code=400, detail="Dataset is empty")
+        raise build_churn_http_exception(
+            status_code=400,
+            code="dataset_empty",
+            message="Dataset is empty.",
+        )
 
     feature_dataframe = build_churn_feature_dataframe_from_records(
         dataframe[FEATURE_COLUMNS].to_dict(orient="records")
     )
     target_series = pd.to_numeric(dataframe[TARGET_COLUMN], errors="coerce")
     if target_series.isna().any():
-        raise HTTPException(status_code=500, detail="Target column churn contains missing or invalid values")
+        raise build_churn_http_exception(
+            status_code=500,
+            code="target_invalid",
+            message="Target column churn contains missing or invalid values.",
+        )
     target_series = target_series.astype(int)
 
     return feature_dataframe, target_series, NUMERIC_FEATURE_COLUMNS, CATEGORICAL_FEATURE_COLUMNS
@@ -295,9 +344,11 @@ def dataframe_to_dataset_rows(dataframe: pd.DataFrame) -> list[DatasetRowChurn]:
         try:
             dataset_rows.append(DatasetRowChurn.model_validate(record))
         except ValidationError as error:
-            raise HTTPException(
+            raise build_churn_http_exception(
                 status_code=500,
-                detail=f"Invalid dataset row at CSV line {index}: {error.errors()}",
+                code="dataset_row_invalid",
+                message="Dataset contains an invalid row.",
+                details={"csv_line": index, "errors": error.errors()},
             ) from error
 
     return dataset_rows
@@ -337,7 +388,12 @@ def get_dataset_split_info(
             stratify=target_series if stratified else None,
         )
     except ValueError as error:
-        raise HTTPException(status_code=500, detail=f"Unable to split dataset: {error}") from error
+        raise build_churn_http_exception(
+            status_code=500,
+            code="dataset_split_failed",
+            message="Unable to split the dataset.",
+            details={"reason": str(error)},
+        ) from error
 
     return DatasetSplitInfoChurn(
         train_size=int(target_train.shape[0]),
@@ -377,7 +433,12 @@ def build_churn_estimator(config: TrainingConfigChurn):
         try:
             return LogisticRegression(**estimator_params)
         except (TypeError, ValueError) as error:
-            raise HTTPException(status_code=400, detail=f"Invalid hyperparameters for logreg: {error}") from error
+            raise build_churn_http_exception(
+                status_code=400,
+                code="invalid_hyperparameters",
+                message="Invalid hyperparameters for logreg.",
+                details={"model_type": "logreg", "reason": str(error)},
+            ) from error
 
     if model_type == "random_forest":
         estimator_params = {
@@ -387,11 +448,18 @@ def build_churn_estimator(config: TrainingConfigChurn):
         try:
             return RandomForestClassifier(**estimator_params)
         except (TypeError, ValueError) as error:
-            raise HTTPException(status_code=400, detail=f"Invalid hyperparameters for random_forest: {error}") from error
+            raise build_churn_http_exception(
+                status_code=400,
+                code="invalid_hyperparameters",
+                message="Invalid hyperparameters for random_forest.",
+                details={"model_type": "random_forest", "reason": str(error)},
+            ) from error
 
-    raise HTTPException(
+    raise build_churn_http_exception(
         status_code=400,
-        detail="Unsupported model_type. Supported values: logreg, random_forest",
+        code="unsupported_model_type",
+        message="Unsupported model_type. Supported values: logreg, random_forest.",
+        details={"supported_values": list(MODEL_NAMES.keys())},
     )
 
 
@@ -430,13 +498,22 @@ def train_churn_model(
     config: TrainingConfigChurn,
 ) -> Pipeline:
     if feature_dataframe.empty or target_series.empty:
-        raise HTTPException(status_code=400, detail="Training dataset is empty")
+        raise build_churn_http_exception(
+            status_code=400,
+            code="dataset_empty",
+            message="Training dataset is empty.",
+        )
 
     pipeline = build_churn_model_pipeline(config)
     try:
         pipeline.fit(feature_dataframe, target_series)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=f"Unable to train model: {error}") from error
+        raise build_churn_http_exception(
+            status_code=400,
+            code="training_failed",
+            message="Unable to train the churn model.",
+            details={"reason": str(error)},
+        ) from error
     return pipeline
 
 
@@ -451,7 +528,11 @@ def run_churn_model_training(
     normalized_config = normalize_training_config(config)
     feature_dataframe, target_series, numeric_columns, categorical_columns = prepare_churn_data()
     if len(feature_dataframe) < 2:
-        raise HTTPException(status_code=400, detail="Dataset does not contain enough rows for training")
+        raise build_churn_http_exception(
+            status_code=400,
+            code="dataset_too_small",
+            message="Dataset does not contain enough rows for training.",
+        )
 
     try:
         features_train, features_test, target_train, target_test = train_test_split(
@@ -462,14 +543,24 @@ def run_churn_model_training(
             stratify=target_series if stratified else None,
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=f"Unable to split dataset for training: {error}") from error
+        raise build_churn_http_exception(
+            status_code=400,
+            code="dataset_split_failed",
+            message="Unable to split the dataset for training.",
+            details={"reason": str(error)},
+        ) from error
 
     trained_churn_model = train_churn_model(features_train, target_train, normalized_config)
 
     try:
         predictions = trained_churn_model.predict(features_test)
     except ValueError as error:
-        raise HTTPException(status_code=500, detail=f"Unable to generate predictions: {error}") from error
+        raise build_churn_http_exception(
+            status_code=500,
+            code="training_evaluation_failed",
+            message="Unable to evaluate the trained churn model.",
+            details={"reason": str(error)},
+        ) from error
 
     training_result = TrainModelResponseChurn(
         model_name=MODEL_NAMES[normalized_config.model_type],

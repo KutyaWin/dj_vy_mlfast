@@ -1,9 +1,11 @@
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FeatureVectorChurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     monthly_fee: float
     usage_hours: float
     support_requests: int
@@ -83,3 +85,15 @@ class ModelSchemaChurn(BaseModel):
     features: list[FeatureSchemaItemChurn]
     numeric_features: list[str]
     categorical_features: list[str]
+
+
+class ErrorDetailChurn(BaseModel):
+    field: Optional[str] = None
+    issue: str
+    input_value: Optional[Any] = None
+
+
+class ErrorResponseChurn(BaseModel):
+    code: str
+    message: str
+    details: Optional[Union[list[ErrorDetailChurn], dict[str, Any]]] = None

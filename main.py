@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional, Union
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ErrorDetailChurn, ErrorResponseChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
 from src.utils import get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
 
 
@@ -16,6 +18,95 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def build_error_response(
+    code: str,
+    message: str,
+    details: Optional[Union[list[ErrorDetailChurn], dict[str, object]]] = None,
+) -> dict[str, object]:
+    return ErrorResponseChurn(code=code, message=message, details=details).model_dump()
+
+
+def normalize_http_exception(exc: HTTPException) -> ErrorResponseChurn:
+    if isinstance(exc.detail, dict):
+        code = exc.detail.get("code")
+        message = exc.detail.get("message")
+        details = exc.detail.get("details")
+        if isinstance(code, str) and isinstance(message, str):
+            return ErrorResponseChurn(code=code, message=message, details=details)
+
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed."
+    return ErrorResponseChurn(code="http_error", message=message, details=None)
+
+
+def build_validation_error_response(exc: RequestValidationError) -> ErrorResponseChurn:
+    details: list[ErrorDetailChurn] = []
+    error_types = set()
+
+    for error in exc.errors():
+        error_type = error.get("type", "validation_error")
+        error_types.add(error_type)
+        raw_location = [str(part) for part in error.get("loc", []) if part != "body"]
+        field = ".".join(raw_location) if raw_location else None
+        details.append(
+            ErrorDetailChurn(
+                field=field,
+                issue=error.get("msg", "Invalid request value."),
+                input_value=error.get("input"),
+            )
+        )
+
+    if any(error_type in {"missing", "extra_forbidden"} for error_type in error_types):
+        return ErrorResponseChurn(
+            code="invalid_feature_count",
+            message="Request body contains missing or unexpected fields.",
+            details=details,
+        )
+
+    if any(
+        error_type.startswith("float")
+        or error_type.startswith("int")
+        or error_type.startswith("string")
+        or error_type.startswith("list")
+        or error_type.startswith("dict")
+        for error_type in error_types
+    ):
+        return ErrorResponseChurn(
+            code="invalid_feature_type",
+            message="Request body contains values of invalid types.",
+            details=details,
+        )
+
+    return ErrorResponseChurn(
+        code="validation_error",
+        message="Request validation failed.",
+        details=details,
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    response = normalize_http_exception(exc)
+    return JSONResponse(status_code=exc.status_code, content=response.model_dump())
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    response = build_validation_error_response(exc)
+    return JSONResponse(status_code=422, content=response.model_dump())
+
+
+@app.exception_handler(Exception)
+async def unexpected_exception_handler(_: Request, __: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content=build_error_response(
+            code="internal_server_error",
+            message="Internal server error.",
+            details=None,
+        ),
+    )
+
+
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"message": "ml churn service is running"}
@@ -25,6 +116,24 @@ def read_root() -> dict[str, str]:
     "/predict",
     response_model=Union[PredictionResponseChurn, list[PredictionResponseChurn]],
     responses={
+        400: {
+            "model": ErrorResponseChurn,
+            "description": "Prediction request is semantically invalid",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "empty_prediction_request": {
+                            "summary": "Empty batch",
+                            "value": {
+                                "code": "empty_prediction_request",
+                                "message": "Prediction request must contain at least one client.",
+                                "details": None,
+                            },
+                        }
+                    }
+                }
+            },
+        },
         200: {
             "description": "Churn predictions for one or multiple clients",
             "content": {
@@ -57,12 +166,68 @@ def read_root() -> dict[str, str]:
                 }
             },
         },
+        422: {
+            "model": ErrorResponseChurn,
+            "description": "Request body validation failed",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "invalid_feature_type": {
+                            "summary": "Wrong value type",
+                            "value": {
+                                "code": "invalid_feature_type",
+                                "message": "Request body contains values of invalid types.",
+                                "details": [
+                                    {
+                                        "field": "usage_hours",
+                                        "issue": "Input should be a valid number, unable to parse string as a number",
+                                        "input_value": "abc",
+                                    }
+                                ],
+                            },
+                        },
+                        "invalid_feature_count": {
+                            "summary": "Missing or extra fields",
+                            "value": {
+                                "code": "invalid_feature_count",
+                                "message": "Request body contains missing or unexpected fields.",
+                                "details": [
+                                    {
+                                        "field": "payment_method",
+                                        "issue": "Field required",
+                                        "input_value": None,
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                }
+            },
+        },
         409: {
+            "model": ErrorResponseChurn,
             "description": "Churn model is not trained yet",
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Churn model is not trained. Train the model via POST /model/train first."
+                        "code": "model_not_trained",
+                        "message": "Churn model is not trained. Train the model via POST /model/train first.",
+                        "details": None,
+                    }
+                }
+            },
+        },
+        500: {
+            "model": ErrorResponseChurn,
+            "description": "Prediction failed due to internal model or preprocessing error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "code": "prediction_failed",
+                        "message": "Unable to generate churn predictions.",
+                        "details": {
+                            "reason": "Model prediction failed for the provided data."
+                        },
                     }
                 }
             },
@@ -138,7 +303,113 @@ def dataset_split_info() -> DatasetSplitInfoChurn:
     return get_dataset_split_info()
 
 
-@app.post("/model/train", response_model=TrainModelResponseChurn)
+@app.post(
+    "/model/train",
+    response_model=TrainModelResponseChurn,
+    responses={
+        400: {
+            "model": ErrorResponseChurn,
+            "description": "Training configuration or dataset is invalid",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "unsupported_model_type": {
+                            "summary": "Unsupported model type",
+                            "value": {
+                                "code": "unsupported_model_type",
+                                "message": "Unsupported model_type. Supported values: logreg, random_forest.",
+                                "details": {
+                                    "supported_values": ["logreg", "random_forest"]
+                                },
+                            },
+                        },
+                        "invalid_hyperparameters": {
+                            "summary": "Invalid hyperparameters",
+                            "value": {
+                                "code": "invalid_hyperparameters",
+                                "message": "Invalid hyperparameters for random_forest.",
+                                "details": {
+                                    "model_type": "random_forest",
+                                    "reason": "max_depth must be greater than 0"
+                                },
+                            },
+                        },
+                        "dataset_empty": {
+                            "summary": "Empty dataset",
+                            "value": {
+                                "code": "dataset_empty",
+                                "message": "Dataset is empty.",
+                                "details": None,
+                            },
+                        },
+                    }
+                }
+            },
+        },
+        404: {
+            "model": ErrorResponseChurn,
+            "description": "Training dataset file was not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "code": "dataset_not_found",
+                        "message": "Dataset file not found.",
+                        "details": None,
+                    }
+                }
+            },
+        },
+        422: {
+            "model": ErrorResponseChurn,
+            "description": "Training request body validation failed",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "code": "invalid_feature_type",
+                        "message": "Request body contains values of invalid types.",
+                        "details": [
+                            {
+                                "field": "hyperparameters",
+                                "issue": "Input should be a valid dictionary",
+                                "input_value": ["not", "a", "dict"],
+                            }
+                        ],
+                    }
+                }
+            },
+        },
+        500: {
+            "model": ErrorResponseChurn,
+            "description": "Unexpected failure during training or model persistence",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "training_failed": {
+                            "summary": "Estimator training failed",
+                            "value": {
+                                "code": "training_failed",
+                                "message": "Unable to train the churn model.",
+                                "details": {
+                                    "reason": "Training data could not be processed by the estimator."
+                                },
+                            },
+                        },
+                        "model_save_failed": {
+                            "summary": "Saving model failed",
+                            "value": {
+                                "code": "model_save_failed",
+                                "message": "Unable to save the trained churn model.",
+                                "details": {
+                                    "reason": "Model artifact could not be written to disk."
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
 def train_model(
     config: Annotated[
         Optional[TrainingConfigChurn],
