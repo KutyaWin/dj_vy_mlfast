@@ -5,8 +5,8 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ErrorDetailChurn, ErrorResponseChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
-from src.utils import get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ErrorDetailChurn, ErrorResponseChurn, FeatureVectorChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.utils import get_churn_model_metrics, get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
 
 
 @asynccontextmanager
@@ -443,6 +443,14 @@ def train_model(
 @app.get("/model/status", response_model=ModelStatusChurn)
 def model_status() -> ModelStatusChurn:
     return get_churn_model_status()
+
+
+@app.get("/model/metrics", response_model=ModelMetricsResponseChurn)
+def model_metrics(
+    limit: Annotated[int, Query(ge=1, le=100)] = 5,
+    model_type: Annotated[Optional[str], Query()] = None,
+) -> ModelMetricsResponseChurn:
+    return get_churn_model_metrics(limit=limit, model_type=model_type)
 
 
 @app.get("/model/schema", response_model=ModelSchemaChurn)

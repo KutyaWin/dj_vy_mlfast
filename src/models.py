@@ -54,6 +54,7 @@ class TrainModelResponseChurn(BaseModel):
     test_size: int
     accuracy: float
     f1: float
+    roc_auc: Optional[float] = None
     random_state: int
     test_size_ratio: float
     numeric_columns: list[str]
@@ -97,3 +98,18 @@ class ErrorResponseChurn(BaseModel):
     code: str
     message: str
     details: Optional[Union[list[ErrorDetailChurn], dict[str, Any]]] = None
+
+
+class TrainingHistoryEntryChurn(BaseModel):
+    timestamp: str
+    model_name: str
+    model_type: str
+    hyperparameters: dict[str, Any] = Field(default_factory=dict)
+    accuracy: float
+    f1: float
+    roc_auc: Optional[float] = None
+
+
+class ModelMetricsResponseChurn(BaseModel):
+    latest: Optional[TrainingHistoryEntryChurn] = None
+    history: list[TrainingHistoryEntryChurn] = Field(default_factory=list)

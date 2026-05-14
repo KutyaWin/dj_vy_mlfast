@@ -10,19 +10,20 @@ from pydantic import ValidationError
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureSchemaItemChurn, FeatureVectorChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureSchemaItemChurn, FeatureVectorChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn, TrainingHistoryEntryChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
 MODELS_PATH = Path(__file__).resolve().parent.parent / "models"
 CHURN_MODEL_PATH = MODELS_PATH / "churn_model.joblib"
 CHURN_MODEL_METADATA_PATH = MODELS_PATH / "churn_model_metadata.json"
+CHURN_TRAINING_HISTORY_PATH = MODELS_PATH / "churn_training_history.json"
 NUMERIC_FEATURE_COLUMNS = [
     "monthly_fee",
     "usage_hours",
@@ -97,6 +98,79 @@ def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
 
     global trained_churn_model_metadata
     trained_churn_model_metadata = metadata
+
+
+def load_churn_training_history() -> list[TrainingHistoryEntryChurn]:
+    if not CHURN_TRAINING_HISTORY_PATH.exists():
+        return []
+
+    try:
+        raw_history = json.loads(CHURN_TRAINING_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise build_churn_http_exception(
+            status_code=500,
+            code="training_history_load_failed",
+            message="Unable to load churn training history.",
+            details={"reason": str(error)},
+        ) from error
+
+    if not isinstance(raw_history, list):
+        raise build_churn_http_exception(
+            status_code=500,
+            code="training_history_invalid",
+            message="Churn training history file has an invalid format.",
+        )
+
+    history: list[TrainingHistoryEntryChurn] = []
+    for entry in raw_history:
+        try:
+            history.append(TrainingHistoryEntryChurn.model_validate(entry))
+        except ValidationError as error:
+            raise build_churn_http_exception(
+                status_code=500,
+                code="training_history_invalid",
+                message="Churn training history file contains an invalid record.",
+                details={"errors": error.errors()},
+            ) from error
+
+    return history
+
+
+def save_churn_training_history(history: list[TrainingHistoryEntryChurn]) -> None:
+    try:
+        MODELS_PATH.mkdir(parents=True, exist_ok=True)
+        CHURN_TRAINING_HISTORY_PATH.write_text(
+            json.dumps([entry.model_dump() for entry in history]),
+            encoding="utf-8",
+        )
+    except Exception as error:
+        raise build_churn_http_exception(
+            status_code=500,
+            code="training_history_save_failed",
+            message="Unable to save churn training history.",
+            details={"reason": str(error)},
+        ) from error
+
+
+def append_churn_training_history(entry: TrainingHistoryEntryChurn) -> None:
+    history = load_churn_training_history()
+    history.append(entry)
+    save_churn_training_history(history)
+
+
+def get_churn_model_metrics(limit: int = 5, model_type: Optional[str] = None) -> ModelMetricsResponseChurn:
+    normalized_model_type = model_type.strip().lower() if model_type is not None else None
+    history = load_churn_training_history()
+    if normalized_model_type is not None:
+        history = [entry for entry in history if entry.model_type == normalized_model_type]
+
+    ordered_history = list(reversed(history))
+    limited_history = ordered_history[:limit]
+
+    return ModelMetricsResponseChurn(
+        latest=limited_history[0] if limited_history else None,
+        history=limited_history,
+    )
 
 
 def load_churn_model() -> Optional[Pipeline]:
@@ -562,6 +636,15 @@ def run_churn_model_training(
             details={"reason": str(error)},
         ) from error
 
+    roc_auc: Optional[float] = None
+    try:
+        prediction_probabilities = trained_churn_model.predict_proba(features_test)
+        class_labels = list(trained_churn_model.classes_)
+        churn_index = class_labels.index(1)
+        roc_auc = float(roc_auc_score(target_test, prediction_probabilities[:, churn_index]))
+    except (AttributeError, ValueError):
+        roc_auc = None
+
     training_result = TrainModelResponseChurn(
         model_name=MODEL_NAMES[normalized_config.model_type],
         model_type=normalized_config.model_type,
@@ -570,6 +653,7 @@ def run_churn_model_training(
         test_size=int(features_test.shape[0]),
         accuracy=float(accuracy_score(target_test, predictions)),
         f1=float(f1_score(target_test, predictions)),
+        roc_auc=roc_auc,
         random_state=random_state,
         test_size_ratio=float(test_size),
         numeric_columns=numeric_columns,
@@ -577,4 +661,15 @@ def run_churn_model_training(
     )
 
     save_churn_model(trained_churn_model, training_result)
+    append_churn_training_history(
+        TrainingHistoryEntryChurn(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            model_name=training_result.model_name,
+            model_type=training_result.model_type,
+            hyperparameters=training_result.hyperparameters,
+            accuracy=training_result.accuracy,
+            f1=training_result.f1,
+            roc_auc=training_result.roc_auc,
+        )
+    )
     return training_result
