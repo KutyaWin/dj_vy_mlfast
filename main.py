@@ -55,6 +55,8 @@ def build_validation_error_response(exc: RequestValidationError) -> ErrorRespons
         error_type = error.get("type", "validation_error")
         error_types.add(error_type)
         raw_location = [str(part) for part in error.get("loc", []) if part != "body"]
+        if raw_location and raw_location[0].endswith("Churn"):
+            raw_location = raw_location[1:]
         field = ".".join(raw_location) if raw_location else None
         details.append(
             ErrorDetailChurn(
