@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 from datetime import datetime, timezone
 import json
+import logging
 
 import joblib
 import pandas as pd
@@ -16,7 +17,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureSchemaItemChurn, FeatureVectorChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn, TrainingHistoryEntryChurn
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, FeatureSchemaItemChurn, FeatureVectorChurn, HealthResponseChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn, TrainingHistoryEntryChurn
 
 
 DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "churn_dataset.csv"
@@ -57,6 +58,7 @@ FEATURE_VALUE_TYPES = {
 
 trained_churn_model: Optional[Pipeline] = None
 trained_churn_model_metadata: Optional[dict[str, object]] = None
+logger = logging.getLogger("churn_service")
 
 
 def build_churn_http_exception(
@@ -89,6 +91,7 @@ def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
         joblib.dump(model, CHURN_MODEL_PATH)
         CHURN_MODEL_METADATA_PATH.write_text(json.dumps(metadata), encoding="utf-8")
     except Exception as error:
+        logger.exception("Failed to save churn model artifact")
         raise build_churn_http_exception(
             status_code=500,
             code="model_save_failed",
@@ -98,6 +101,7 @@ def save_churn_model(model: Pipeline, metrics: TrainModelResponseChurn) -> None:
 
     global trained_churn_model_metadata
     trained_churn_model_metadata = metadata
+    logger.info("Saved churn model metadata", extra={"model_type": metrics.model_type})
 
 
 def load_churn_training_history() -> list[TrainingHistoryEntryChurn]:
@@ -107,6 +111,7 @@ def load_churn_training_history() -> list[TrainingHistoryEntryChurn]:
     try:
         raw_history = json.loads(CHURN_TRAINING_HISTORY_PATH.read_text(encoding="utf-8"))
     except Exception as error:
+        logger.exception("Failed to load churn training history")
         raise build_churn_http_exception(
             status_code=500,
             code="training_history_load_failed",
@@ -126,6 +131,7 @@ def load_churn_training_history() -> list[TrainingHistoryEntryChurn]:
         try:
             history.append(TrainingHistoryEntryChurn.model_validate(entry))
         except ValidationError as error:
+            logger.exception("Invalid record found in churn training history")
             raise build_churn_http_exception(
                 status_code=500,
                 code="training_history_invalid",
@@ -144,6 +150,7 @@ def save_churn_training_history(history: list[TrainingHistoryEntryChurn]) -> Non
             encoding="utf-8",
         )
     except Exception as error:
+        logger.exception("Failed to save churn training history")
         raise build_churn_http_exception(
             status_code=500,
             code="training_history_save_failed",
@@ -156,6 +163,7 @@ def append_churn_training_history(entry: TrainingHistoryEntryChurn) -> None:
     history = load_churn_training_history()
     history.append(entry)
     save_churn_training_history(history)
+    logger.info("Appended churn training history entry", extra={"model_type": entry.model_type})
 
 
 def get_churn_model_metrics(limit: int = 5, model_type: Optional[str] = None) -> ModelMetricsResponseChurn:
@@ -180,6 +188,7 @@ def load_churn_model() -> Optional[Pipeline]:
     if not CHURN_MODEL_PATH.exists():
         trained_churn_model = None
         trained_churn_model_metadata = None
+        logger.info("No persisted churn model found on disk")
         return None
 
     try:
@@ -187,6 +196,7 @@ def load_churn_model() -> Optional[Pipeline]:
     except Exception:
         trained_churn_model = None
         trained_churn_model_metadata = None
+        logger.exception("Failed to load persisted churn model")
         return None
 
     metadata: Optional[dict[str, object]] = None
@@ -198,10 +208,12 @@ def load_churn_model() -> Optional[Pipeline]:
 
     trained_churn_model = loaded_model
     trained_churn_model_metadata = metadata or {"model_path": str(CHURN_MODEL_PATH)}
+    logger.info("Loaded persisted churn model")
     return loaded_model
 
 
 def initialize_churn_model_state() -> None:
+    logger.info("Initializing churn model state")
     load_churn_model()
 
 
@@ -250,6 +262,7 @@ def get_active_churn_model() -> Pipeline:
 
     loaded_model = load_churn_model()
     if loaded_model is None:
+        logger.warning("Prediction requested without a trained churn model")
         raise build_churn_http_exception(
             status_code=409,
             code="model_not_trained",
@@ -303,12 +316,14 @@ def build_churn_feature_dataframe(payloads: list[FeatureVectorChurn]) -> pd.Data
 
 def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponseChurn]:
     if not payloads:
+        logger.warning("Received empty churn prediction request")
         raise build_churn_http_exception(
             status_code=400,
             code="empty_prediction_request",
             message="Prediction request must contain at least one client.",
         )
 
+    logger.info("Generating churn predictions", extra={"batch_size": len(payloads)})
     model = get_active_churn_model()
     feature_dataframe = build_churn_feature_dataframe(payloads)
 
@@ -316,6 +331,7 @@ def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponse
         predicted_classes = model.predict(feature_dataframe)
         predicted_probabilities = model.predict_proba(feature_dataframe)
     except ValueError as error:
+        logger.exception("Failed to generate churn predictions")
         raise build_churn_http_exception(
             status_code=500,
             code="prediction_failed",
@@ -337,11 +353,14 @@ def predict_churn(payloads: list[FeatureVectorChurn]) -> list[PredictionResponse
             )
         )
 
+    logger.info("Generated churn predictions successfully", extra={"batch_size": len(responses)})
     return responses
 
 
 def load_churn_dataset() -> pd.DataFrame:
+    logger.info("Loading churn dataset", extra={"dataset_path": str(DATASET_PATH)})
     if not DATASET_PATH.exists():
+        logger.error("Churn dataset file not found", extra={"dataset_path": str(DATASET_PATH)})
         raise build_churn_http_exception(
             status_code=404,
             code="dataset_not_found",
@@ -351,6 +370,7 @@ def load_churn_dataset() -> pd.DataFrame:
     try:
         dataframe = pd.read_csv(DATASET_PATH)
     except pd.errors.EmptyDataError as error:
+        logger.exception("Churn dataset file is empty")
         raise build_churn_http_exception(
             status_code=400,
             code="dataset_file_empty",
@@ -359,6 +379,7 @@ def load_churn_dataset() -> pd.DataFrame:
 
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in dataframe.columns]
     if missing_columns:
+        logger.error("Churn dataset is missing required columns", extra={"missing_columns": missing_columns})
         raise build_churn_http_exception(
             status_code=500,
             code="dataset_schema_invalid",
@@ -366,6 +387,7 @@ def load_churn_dataset() -> pd.DataFrame:
             details={"missing_columns": missing_columns},
         )
 
+    logger.info("Loaded churn dataset successfully", extra={"row_count": int(dataframe.shape[0])})
     return dataframe[REQUIRED_COLUMNS]
 
 
@@ -418,6 +440,7 @@ def dataframe_to_dataset_rows(dataframe: pd.DataFrame) -> list[DatasetRowChurn]:
         try:
             dataset_rows.append(DatasetRowChurn.model_validate(record))
         except ValidationError as error:
+            logger.exception("Invalid churn dataset row encountered", extra={"csv_line": index})
             raise build_churn_http_exception(
                 status_code=500,
                 code="dataset_row_invalid",
@@ -579,15 +602,18 @@ def train_churn_model(
         )
 
     pipeline = build_churn_model_pipeline(config)
+    logger.info("Training churn model", extra={"model_type": config.model_type, "row_count": int(feature_dataframe.shape[0])})
     try:
         pipeline.fit(feature_dataframe, target_series)
     except ValueError as error:
+        logger.exception("Failed to train churn model")
         raise build_churn_http_exception(
             status_code=400,
             code="training_failed",
             message="Unable to train the churn model.",
             details={"reason": str(error)},
         ) from error
+    logger.info("Finished training churn model", extra={"model_type": config.model_type})
     return pipeline
 
 
@@ -600,8 +626,10 @@ def run_churn_model_training(
     global trained_churn_model
 
     normalized_config = normalize_training_config(config)
+    logger.info("Starting churn training run", extra={"model_type": normalized_config.model_type})
     feature_dataframe, target_series, numeric_columns, categorical_columns = prepare_churn_data()
     if len(feature_dataframe) < 2:
+        logger.warning("Churn dataset is too small for training")
         raise build_churn_http_exception(
             status_code=400,
             code="dataset_too_small",
@@ -617,6 +645,7 @@ def run_churn_model_training(
             stratify=target_series if stratified else None,
         )
     except ValueError as error:
+        logger.exception("Failed to split churn dataset for training")
         raise build_churn_http_exception(
             status_code=400,
             code="dataset_split_failed",
@@ -629,6 +658,7 @@ def run_churn_model_training(
     try:
         predictions = trained_churn_model.predict(features_test)
     except ValueError as error:
+        logger.exception("Failed to evaluate trained churn model")
         raise build_churn_http_exception(
             status_code=500,
             code="training_evaluation_failed",
@@ -672,4 +702,50 @@ def run_churn_model_training(
             roc_auc=training_result.roc_auc,
         )
     )
+    logger.info(
+        "Completed churn training run",
+        extra={
+            "model_type": training_result.model_type,
+            "accuracy": training_result.accuracy,
+            "f1": training_result.f1,
+            "roc_auc": training_result.roc_auc,
+        },
+    )
     return training_result
+
+
+def get_churn_health_status() -> HealthResponseChurn:
+    dataset_available = False
+    dataset_row_count: Optional[int] = None
+    model_available = False
+    details: dict[str, Any] = {}
+
+    try:
+        dataframe = load_churn_dataset()
+        dataset_available = True
+        dataset_row_count = int(dataframe.shape[0])
+    except HTTPException as error:
+        details["dataset_error"] = error.detail
+
+    try:
+        model = get_active_churn_model()
+        model_available = model is not None
+    except HTTPException as error:
+        details["model_error"] = error.detail
+
+    status = "ok" if dataset_available and model_available else "degraded"
+    logger.info(
+        "Computed churn service health status",
+        extra={
+            "status": status,
+            "dataset_available": dataset_available,
+            "model_available": model_available,
+        },
+    )
+    return HealthResponseChurn(
+        status=status,
+        model_available=model_available,
+        dataset_available=dataset_available,
+        dataset_row_count=dataset_row_count,
+        details=details or None,
+    )

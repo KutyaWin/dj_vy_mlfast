@@ -1,16 +1,25 @@
 from contextlib import asynccontextmanager
+import logging
 from typing import Annotated, Optional, Union
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ErrorDetailChurn, ErrorResponseChurn, FeatureVectorChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
-from src.utils import get_churn_model_metrics, get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
+from src.models import DatasetInfoChurn, DatasetRowChurn, DatasetSplitInfoChurn, ErrorDetailChurn, ErrorResponseChurn, FeatureVectorChurn, HealthResponseChurn, ModelMetricsResponseChurn, ModelSchemaChurn, ModelStatusChurn, PredictionResponseChurn, TrainingConfigChurn, TrainModelResponseChurn
+from src.utils import get_churn_health_status, get_churn_model_metrics, get_churn_model_schema, get_churn_model_status, get_dataset_info, get_dataset_preview, get_dataset_split_info, initialize_churn_model_state, predict_churn, run_churn_model_training
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("churn_service")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info("Starting churn FastAPI lifespan")
     initialize_churn_model_state()
     yield
 
@@ -85,18 +94,21 @@ def build_validation_error_response(exc: RequestValidationError) -> ErrorRespons
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    logger.warning("Handled HTTP exception", extra={"status_code": exc.status_code, "detail": exc.detail})
     response = normalize_http_exception(exc)
     return JSONResponse(status_code=exc.status_code, content=response.model_dump())
 
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    logger.warning("Handled request validation error", extra={"errors": exc.errors()})
     response = build_validation_error_response(exc)
     return JSONResponse(status_code=422, content=response.model_dump())
 
 
 @app.exception_handler(Exception)
-async def unexpected_exception_handler(_: Request, __: Exception) -> JSONResponse:
+async def unexpected_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled internal server error", exc_info=exc)
     return JSONResponse(
         status_code=500,
         content=build_error_response(
@@ -283,6 +295,7 @@ def predict(
     )
 ) -> Union[PredictionResponseChurn, list[PredictionResponseChurn]]:
     payloads = payload if isinstance(payload, list) else [payload]
+    logger.info("Received /predict request", extra={"batch_size": len(payloads)})
     predictions = predict_churn(payloads)
     return predictions if isinstance(payload, list) else predictions[0]
 
@@ -437,12 +450,20 @@ def train_model(
         ),
     ] = None
 ) -> TrainModelResponseChurn:
+    logger.info("Received /model/train request")
     return run_churn_model_training(config=config)
 
 
 @app.get("/model/status", response_model=ModelStatusChurn)
 def model_status() -> ModelStatusChurn:
     return get_churn_model_status()
+
+
+@app.get("/health", response_model=HealthResponseChurn)
+def health() -> JSONResponse:
+    health_status = get_churn_health_status()
+    status_code = 200 if health_status.status == "ok" else 503
+    return JSONResponse(status_code=status_code, content=health_status.model_dump())
 
 
 @app.get("/model/metrics", response_model=ModelMetricsResponseChurn)

@@ -113,3 +113,11 @@ class TrainingHistoryEntryChurn(BaseModel):
 class ModelMetricsResponseChurn(BaseModel):
     latest: Optional[TrainingHistoryEntryChurn] = None
     history: list[TrainingHistoryEntryChurn] = Field(default_factory=list)
+
+
+class HealthResponseChurn(BaseModel):
+    status: str
+    model_available: bool
+    dataset_available: bool
+    dataset_row_count: Optional[int] = None
+    details: Optional[dict[str, Any]] = None
