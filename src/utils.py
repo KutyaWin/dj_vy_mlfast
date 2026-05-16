@@ -39,7 +39,6 @@ TARGET_COLUMN = "churn"
 REQUIRED_COLUMNS = FEATURE_COLUMNS + [TARGET_COLUMN]
 DEFAULT_TEST_SIZE = 0.2
 DEFAULT_RANDOM_STATE = 42
-DEFAULT_MODEL_TYPE = "logreg"
 MODEL_NAMES = {
     "logreg": "LogisticRegression",
     "random_forest": "RandomForestClassifier",

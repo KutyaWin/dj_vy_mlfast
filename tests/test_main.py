@@ -171,6 +171,36 @@ def test_api_predict_without_trained_model_returns_structured_error(client):
     assert payload["details"] is None
 
 
+def test_api_health_returns_degraded_before_training_and_ok_after_training(client):
+    degraded_response = client.get("/health")
+
+    assert degraded_response.status_code == 503
+    degraded_payload = degraded_response.json()
+    assert degraded_payload["status"] == "degraded"
+    assert degraded_payload["dataset_available"] is True
+    assert degraded_payload["model_available"] is False
+    assert degraded_payload["dataset_row_count"] == 24
+
+    train_response = client.post("/model/train", json={"model_type": "logreg", "hyperparameters": {}})
+    assert train_response.status_code == 200
+
+    healthy_response = client.get("/health")
+
+    assert healthy_response.status_code == 200
+    healthy_payload = healthy_response.json()
+    assert healthy_payload["status"] == "ok"
+    assert healthy_payload["dataset_available"] is True
+    assert healthy_payload["model_available"] is True
+    assert healthy_payload["dataset_row_count"] == 24
+
+
+def test_api_docs_endpoint_is_available(client):
+    response = client.get("/docs")
+
+    assert response.status_code == 200
+    assert "Swagger UI" in response.text
+
+
 def test_api_predict_validation_error_returns_structured_details(client):
     invalid_payload = build_sample_payload()
     invalid_payload["usage_hours"] = "invalid-number"

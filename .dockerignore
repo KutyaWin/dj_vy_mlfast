@@ -1,0 +1,9 @@
+.git
+.gitignore
+.venv
+.idea
+__pycache__
+.pytest_cache
+tests
+models
+*.iml
